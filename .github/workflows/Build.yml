@@ -12,8 +12,6 @@ on:
           - thin
           - full
           - none
-  push:
-    branches: [ main, master ]
 
 jobs:
   build:
