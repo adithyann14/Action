@@ -1,0 +1,129 @@
+name: Build Pipa Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      lto:
+        description: 'LTO mode (thin/full/none)'
+        required: false
+        default: 'thin'
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev zip wget
+
+      - name: Download Clang
+        run: |
+          mkdir -p $HOME/tc
+          curl -L -o /tmp/clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz"
+          tar -xzf /tmp/clang.tar.gz -C $HOME/tc
+          echo "$HOME/tc/bin" >> $GITHUB_PATH
+
+      - name: Clone kernel
+        run: |
+          git clone --depth=1 -b lineage-23.2 https://github.com/pipa-random/android_kernel_xiaomi_sm8250
+          cd kernel
+
+      - name: Build Pipa kernel with LTO=${{ github.event.inputs.lto || 'thin' }}
+        run: |
+          cd kernel
+          
+          # Set LTO mode
+          LTO_MODE="${{ github.event.inputs.lto || 'thin' }}"
+          
+          echo "========================================="
+          echo "Building Pipa Kernel"
+          echo "LTO mode: $LTO_MODE"
+          echo "========================================="
+          
+          # Merge all defconfigs into pipa_merged_defconfig
+          echo "Merging defconfigs..."
+          cat arch/arm64/configs/vendor/kona-perf_defconfig \
+              arch/arm64/configs/vendor/debugfs.config \
+              arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
+              arch/arm64/configs/vendor/xiaomi/pipa.config \
+              > arch/arm64/configs/pipa_merged_defconfig
+          
+          # Add LTO config based on selection
+          case "$LTO_MODE" in
+            full)
+              echo "CONFIG_LTO_CLANG=y" >> arch/arm64/configs/pipa_merged_defconfig
+              echo "CONFIG_LTO_CLANG_FULL=y" >> arch/arm64/configs/pipa_merged_defconfig
+              echo "CONFIG_THINLTO=n" >> arch/arm64/configs/pipa_merged_defconfig
+              ;;
+            thin)
+              echo "CONFIG_LTO_CLANG=y" >> arch/arm64/configs/pipa_merged_defconfig
+              echo "CONFIG_LTO_CLANG_THIN=y" >> arch/arm64/configs/pipa_merged_defconfig
+              echo "CONFIG_THINLTO=y" >> arch/arm64/configs/pipa_merged_defconfig
+              ;;
+            none)
+              echo "CONFIG_LTO_NONE=y" >> arch/arm64/configs/pipa_merged_defconfig
+              echo "CONFIG_LTO_CLANG=n" >> arch/arm64/configs/pipa_merged_defconfig
+              ;;
+          esac
+          
+          # Configure with merged defconfig
+          echo "Configuring kernel..."
+          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            pipa_merged_defconfig
+          
+          # Build kernel
+          echo "Building kernel..."
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang LLVM=1 LLVM_IAS=1 \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            all
+          
+          # Check if build succeeded
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            echo "Build successful!"
+            echo "Image size: $(ls -lh out/arch/arm64/boot/Image | awk '{print $5}')"
+          else
+            echo "Build failed!"
+            exit 1
+          fi
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-pipa-${{ github.event.inputs.lto || 'thin' }}
+          path: kernel/out/arch/arm64/boot/Image
+          retention-days: 30
+
+      - name: Upload dtbo.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtbo-pipa-${{ github.event.inputs.lto || 'thin' }}
+          path: kernel/out/arch/arm64/boot/dtbo.img
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload dtb
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtb-pipa-${{ github.event.inputs.lto || 'thin' }}
+          path: kernel/out/arch/arm64/boot/dtb
+          retention-days: 30
+          if-no-files-found: ignore
