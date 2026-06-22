@@ -37,7 +37,7 @@ jobs:
 
       - name: Clone kernel
         run: |
-          git clone --depth=1 -b lineage-23.2 https://github.com/pipa-random/android_kernel_xiaomi_sm8250
+          git clone --depth=1 -b lineage-23.2 https://github.com/pipa-random/android_kernel_xiaomi_sm8250 ./kernel
           cd kernel
 
       - name: Build Pipa kernel with LTO=${{ github.event.inputs.lto || 'thin' }}
