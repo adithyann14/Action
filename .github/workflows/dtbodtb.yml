@@ -1,0 +1,143 @@
+name: Build Pipa DTB and DTBO only
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-dt:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev zip wget
+
+      - name: Download Clang
+        run: |
+          mkdir -p $HOME/tc
+          curl -L -o /tmp/clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz"
+          tar -xzf /tmp/clang.tar.gz -C $HOME/tc
+          echo "$HOME/tc/bin" >> $GITHUB_PATH
+
+      - name: Clone kernel
+        run: |
+          git clone --depth=1 https://github.com/adithyann14/android_kernel_xiaomi_sm8250 ./kernel
+
+      - name: Configure kernel
+        run: |
+          cd kernel
+          cat arch/arm64/configs/vendor/kona-perf_defconfig \
+              arch/arm64/configs/vendor/debugfs.config \
+              arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
+              arch/arm64/configs/vendor/xiaomi/pipa.config \
+              > arch/arm64/configs/pipa_merged_defconfig
+
+          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            pipa_merged_defconfig
+
+      - name: Build DTBs
+        run: |
+          cd kernel
+          echo "=== Trying dtbs target ==="
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang LLVM=1 LLVM_IAS=1 \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            dtbs || echo "dtbs target failed, will try via all"
+
+      - name: Build DTBO
+        run: |
+          cd kernel
+          echo "=== Trying dtbo.img target ==="
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang LLVM=1 LLVM_IAS=1 \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            dtbo.img || \
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang LLVM=1 LLVM_IAS=1 \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            dtbo || echo "Both dtbo targets failed"
+
+      - name: Debug - Find all DT files
+        run: |
+          cd kernel
+          echo "=== All DT files in out/ ==="
+          find out/ -name "*.dtb" -o -name "*.dtbo" -o \
+            -name "dtbo.img" -o -name "dtb" 2>/dev/null | sort
+
+          echo ""
+          echo "=== boot/ contents ==="
+          ls -lh out/arch/arm64/boot/ || true
+
+          echo ""
+          echo "=== dts/ tree ==="
+          find out/arch/arm64/boot/dts -type d 2>/dev/null | sort || true
+
+      - name: Collect DT artifacts
+        run: |
+          mkdir -p output
+          cd kernel
+
+          # dtbo.img
+          DTBO=$(find out/ -name "dtbo.img" 2>/dev/null | head -1)
+          if [ -n "$DTBO" ]; then
+            cp "$DTBO" ../output/dtbo.img
+            echo "✓ dtbo.img: $DTBO"
+          else
+            echo "✗ dtbo.img not found"
+          fi
+
+          # dtb (single file)
+          DTB=$(find out/ -name "dtb" -not -type d 2>/dev/null | head -1)
+          if [ -n "$DTB" ]; then
+            cp "$DTB" ../output/dtb
+            echo "✓ dtb: $DTB"
+          fi
+
+          # individual dtbs
+          DTB_COUNT=$(find out/ -name "*.dtb" 2>/dev/null | wc -l)
+          if [ "$DTB_COUNT" -gt 0 ]; then
+            mkdir -p ../output/dtbs
+            find out/ -name "*.dtb" -exec cp {} ../output/dtbs/ \;
+            echo "✓ $DTB_COUNT .dtb files"
+          fi
+
+          # individual dtbos
+          DTBO_COUNT=$(find out/ -name "*.dtbo" 2>/dev/null | wc -l)
+          if [ "$DTBO_COUNT" -gt 0 ]; then
+            mkdir -p ../output/dtbos
+            find out/ -name "*.dtbo" -exec cp {} ../output/dtbos/ \;
+            echo "✓ $DTBO_COUNT .dtbo files"
+          fi
+
+          echo ""
+          echo "=== Output ==="
+          ls -lhR ../output/
+
+          cd ..
+          zip -r pipa-dt-$(date +%Y%m%d-%H%M).zip output/
+          echo "ZIP_NAME=pipa-dt-$(date +%Y%m%d-%H%M).zip" >> $GITHUB_ENV
+
+      - name: Upload DT zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipa-dt-${{ github.run_id }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
