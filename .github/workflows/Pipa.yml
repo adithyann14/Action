@@ -37,14 +37,12 @@ jobs:
 
       - name: Clone kernel
         run: |
-          git clone --depth=1 -b lineage-23.2 https://github.com/pipa-random/android_kernel_xiaomi_sm8250 ./kernel
-          cd kernel
+          git clone --depth=1 https://github.com/adithyann14/android_kernel_xiaomi_sm8250 ./kernel
 
       - name: Build Pipa kernel with LTO=${{ github.event.inputs.lto || 'thin' }}
         run: |
           cd kernel
           
-          # Set LTO mode
           LTO_MODE="${{ github.event.inputs.lto || 'thin' }}"
           
           echo "========================================="
@@ -52,7 +50,6 @@ jobs:
           echo "LTO mode: $LTO_MODE"
           echo "========================================="
           
-          # Merge all defconfigs into pipa_merged_defconfig
           echo "Merging defconfigs..."
           cat arch/arm64/configs/vendor/kona-perf_defconfig \
               arch/arm64/configs/vendor/debugfs.config \
@@ -60,7 +57,6 @@ jobs:
               arch/arm64/configs/vendor/xiaomi/pipa.config \
               > arch/arm64/configs/pipa_merged_defconfig
           
-          # Add LTO config based on selection
           case "$LTO_MODE" in
             full)
               echo "CONFIG_LTO_CLANG=y" >> arch/arm64/configs/pipa_merged_defconfig
@@ -78,14 +74,12 @@ jobs:
               ;;
           esac
           
-          # Configure with merged defconfig
           echo "Configuring kernel..."
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             pipa_merged_defconfig
           
-          # Build kernel
           echo "Building kernel..."
           make -j$(nproc) O=out ARCH=arm64 \
             CC=clang LLVM=1 LLVM_IAS=1 \
@@ -96,7 +90,6 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             all
           
-          # Check if build succeeded
           if [ -f "out/arch/arm64/boot/Image" ]; then
             echo "Build successful!"
             echo "Image size: $(ls -lh out/arch/arm64/boot/Image | awk '{print $5}')"
@@ -105,25 +98,51 @@ jobs:
             exit 1
           fi
 
-      - name: Upload Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image-pipa-${{ github.event.inputs.lto || 'thin' }}
-          path: kernel/out/arch/arm64/boot/Image
-          retention-days: 30
+      - name: Collect and package artifacts
+        run: |
+          cd kernel
+          mkdir -p ../output
 
-      - name: Upload dtbo.img
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtbo-pipa-${{ github.event.inputs.lto || 'thin' }}
-          path: kernel/out/arch/arm64/boot/dtbo.img
-          retention-days: 30
-          if-no-files-found: ignore
+          # Copy Image
+          cp out/arch/arm64/boot/Image ../output/
 
-      - name: Upload dtb
+          # Find and copy dtbo.img
+          DTBO=$(find out/arch/arm64/boot -name "dtbo.img" 2>/dev/null | head -1)
+          if [ -n "$DTBO" ]; then
+            echo "Found dtbo.img at: $DTBO"
+            cp "$DTBO" ../output/
+          else
+            echo "dtbo.img not found, skipping"
+          fi
+
+          # Find and copy dtb (file or folder)
+          DTB=$(find out/arch/arm64/boot -name "dtb" 2>/dev/null | head -1)
+          if [ -n "$DTB" ]; then
+            echo "Found dtb at: $DTB"
+            if [ -d "$DTB" ]; then
+              cp -r "$DTB" ../output/dtb/
+            else
+              cp "$DTB" ../output/
+            fi
+          else
+            echo "dtb not found, skipping"
+          fi
+
+          # List what we collected
+          echo "=== Collected artifacts ==="
+          ls -lh ../output/
+
+          # Compress everything into a zip
+          cd ..
+          ZIP_NAME="pipa-kernel-${{ github.event.inputs.lto || 'thin' }}-$(date +%Y%m%d-%H%M).zip"
+          zip -r "$ZIP_NAME" output/
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "=== Final zip ==="
+          ls -lh "$ZIP_NAME"
+
+      - name: Upload kernel zip
         uses: actions/upload-artifact@v4
         with:
-          name: dtb-pipa-${{ github.event.inputs.lto || 'thin' }}
-          path: kernel/out/arch/arm64/boot/dtb
+          name: pipa-kernel-${{ github.event.inputs.lto || 'thin' }}-${{ github.run_id }}
+          path: ${{ env.ZIP_NAME }}
           retention-days: 30
-          if-no-files-found: ignore
