@@ -98,47 +98,99 @@ jobs:
             exit 1
           fi
 
+      - name: Debug - Find all DT files everywhere
+        run: |
+          cd kernel
+          echo "=== Searching entire out/ for dtb/dtbo ==="
+          find out/ -name "*.dtb" -o -name "*.dtbo" -o -name "dtbo.img" -o -name "dtb" 2>/dev/null | sort
+
+          echo ""
+          echo "=== Contents of out/arch/arm64/boot/ ==="
+          ls -lh out/arch/arm64/boot/ || true
+
+          echo ""
+          echo "=== Contents of out/arch/arm64/boot/dts/ (if exists) ==="
+          ls -lh out/arch/arm64/boot/dts/ 2>/dev/null || echo "dts/ not found"
+
+          echo ""
+          echo "=== Recursive DTS vendor dirs ==="
+          find out/arch/arm64/boot/dts -type d 2>/dev/null | sort || echo "No dts dirs found"
+
+          echo ""
+          echo "=== arm64 Makefile DT targets ==="
+          grep -i "dtb\|dtbo\|overlay" arch/arm64/Makefile 2>/dev/null || true
+
+          echo ""
+          echo "=== boot Makefile DT targets ==="
+          grep -i "dtb\|dtbo\|overlay" arch/arm64/boot/Makefile 2>/dev/null || true
+
+          echo ""
+          echo "=== pipa.config DT related ==="
+          grep -i "dtb\|dtbo\|overlay\|DTS\|BUILD_ARM64" \
+            arch/arm64/configs/vendor/xiaomi/pipa.config 2>/dev/null || true
+
+          echo ""
+          echo "=== kona defconfig DT related ==="
+          grep -i "dtb\|dtbo\|overlay\|DTS\|BUILD_ARM64" \
+            arch/arm64/configs/vendor/kona-perf_defconfig 2>/dev/null || true
+
       - name: Collect and package artifacts
         run: |
           cd kernel
           mkdir -p ../output
 
-          # Copy Image
+          # Image
           cp out/arch/arm64/boot/Image ../output/
+          echo "✓ Image copied"
 
-          # Find and copy dtbo.img
-          DTBO=$(find out/arch/arm64/boot -name "dtbo.img" 2>/dev/null | head -1)
+          # dtbo.img - search everywhere
+          DTBO=$(find out/ -name "dtbo.img" 2>/dev/null | head -1)
           if [ -n "$DTBO" ]; then
-            echo "Found dtbo.img at: $DTBO"
-            cp "$DTBO" ../output/
+            cp "$DTBO" ../output/dtbo.img
+            echo "✓ dtbo.img found at: $DTBO"
           else
-            echo "dtbo.img not found, skipping"
+            echo "✗ dtbo.img not found anywhere"
           fi
 
-          # Find and copy dtb (file or folder)
-          DTB=$(find out/arch/arm64/boot -name "dtb" 2>/dev/null | head -1)
-          if [ -n "$DTB" ]; then
-            echo "Found dtb at: $DTB"
-            if [ -d "$DTB" ]; then
-              cp -r "$DTB" ../output/dtb/
-            else
-              cp "$DTB" ../output/
-            fi
+          # dtb file (concatenated)
+          DTB_FILE=$(find out/ -name "dtb" -not -type d 2>/dev/null | head -1)
+          if [ -n "$DTB_FILE" ]; then
+            cp "$DTB_FILE" ../output/dtb
+            echo "✓ dtb file found at: $DTB_FILE"
           else
-            echo "dtb not found, skipping"
+            echo "✗ dtb file not found"
           fi
 
-          # List what we collected
-          echo "=== Collected artifacts ==="
-          ls -lh ../output/
+          # individual .dtb files
+          DTB_COUNT=$(find out/ -name "*.dtb" 2>/dev/null | wc -l)
+          if [ "$DTB_COUNT" -gt 0 ]; then
+            mkdir -p ../output/dtbs
+            find out/ -name "*.dtb" -exec cp {} ../output/dtbs/ \;
+            echo "✓ Found $DTB_COUNT .dtb files"
+          else
+            echo "✗ No individual .dtb files found"
+          fi
 
-          # Compress everything into a zip
+          # individual .dtbo files
+          DTBO_COUNT=$(find out/ -name "*.dtbo" 2>/dev/null | wc -l)
+          if [ "$DTBO_COUNT" -gt 0 ]; then
+            mkdir -p ../output/dtbos
+            find out/ -name "*.dtbo" -exec cp {} ../output/dtbos/ \;
+            echo "✓ Found $DTBO_COUNT .dtbo files"
+          else
+            echo "✗ No individual .dtbo files found"
+          fi
+
+          echo ""
+          echo "=== Final output ==="
+          ls -lhR ../output/
+
+          # Zip everything
           cd ..
           ZIP_NAME="pipa-kernel-${{ github.event.inputs.lto || 'thin' }}-$(date +%Y%m%d-%H%M).zip"
           zip -r "$ZIP_NAME" output/
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "=== Final zip ==="
-          ls -lh "$ZIP_NAME"
+          echo "✓ Zipped as $ZIP_NAME ($(ls -lh $ZIP_NAME | awk '{print $5}'))"
 
       - name: Upload kernel zip
         uses: actions/upload-artifact@v4
